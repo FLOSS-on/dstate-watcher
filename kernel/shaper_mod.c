@@ -1,5 +1,9 @@
+#include "asm-generic/errno-base.h"
 #include "linux/gfp_types.h"
+#include "linux/jiffies.h"
+#include "linux/kasan.h"
 #include "linux/llist.h"
+#include "linux/percpu-defs.h"
 #include "linux/printk.h"
 #include "linux/spinlock_types.h"
 #include "linux/stddef.h"
@@ -24,15 +28,14 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
+#include <linux/percpu.h>
 
 MODULE_LICENSE("GPL");
 
 // глобальные переменные ################
-static u64 load_time;
-static u64 start_time;
 static struct tracepoint* found_swith = NULL;
 static struct tracepoint* found_wakeup = NULL;
-static struct work_struct event_work;
+static struct delayed_work event_work;
 
 
 // структураы #############
@@ -69,9 +72,11 @@ static LIST_HEAD(sleeping_tasks);
 
 static DEFINE_MUTEX(sleeping_tasks_mutex);
 
+static DEFINE_PER_CPU(int, in_sched_probe);
+
 
 // отложенный обработчик для парсв llist в основной циклический список
-static void pars_event_llist_in_sleeping_tasks(struct work_struct* event_work) {
+static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
   // перменная указатель на next
   struct llist_node*  next_events;
   // переменная укаазатель на поля моего sleep_event
@@ -88,16 +93,14 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* event_work) {
     next = next_events->next;
     // получаем все поля структуры из списка
     pols_list = llist_entry(next_events, struct sleep_event , node);
-    // сортировка событий 
+    // сортировка событий
     switch (pols_list->type) {
       case SLEEP_YES:{
-        //хрнаит структуру основного списка 
+        //хрнаит структуру основного списка
         struct sleeping_task* sleep_task;
         // выделяем память под структуру
         sleep_task = kzalloc(sizeof(*sleep_task), GFP_KERNEL);
-        if(!sleep_task){
-          break;
-        } else {
+        if(sleep_task){
           //копируем данные из вторичного листа в струтуру основного
           sleep_task->pid = pols_list->pid;
           sleep_task->sleep_start = pols_list->time_event_start;
@@ -136,6 +139,7 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* event_work) {
     //переходим к слкдующему ивенту
     next_events = next;
   }
+  schedule_delayed_work(&event_work, msecs_to_jiffies(100));
 }
 
 
@@ -144,13 +148,15 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* event_work) {
 static void probe_sched_switch(void* data, bool preempt, struct task_struct* prev, struct task_struct* next, unsigned int prev_state) {
   // переменная которая хранит адрес структуры типа sleep_event
   struct sleep_event* new_event;
-  // главное условие если процес сам выщел(хранит тру если вытеснели поэтому
-  // отрицаес до фолз), и проверяем есть ли бит D у потока
-  if (!preempt && (prev_state & TASK_UNINTERRUPTIBLE)) {
-    // выделение памяти,  с флагом "без сна"
+  if (preempt || !(prev_state & TASK_UNINTERRUPTIBLE)){
+    return;
+  }
+  if (this_cpu_inc_return(in_sched_probe) > 1) {
+        goto out_dec;
+    }
     new_event = kzalloc(sizeof(*new_event), GFP_ATOMIC);
     if (!new_event) {
-      return;
+      goto out_dec;
     }
     // получаем данные в структуру
     new_event->pid = prev->pid;
@@ -159,17 +165,21 @@ static void probe_sched_switch(void* data, bool preempt, struct task_struct* pre
     get_task_comm(new_event->comm, prev);
     // передаем в ллист
     llist_add(&new_event->node, &sleep_event_list);
-    schedule_work(&event_work);
-  }
+  out_dec:
+    this_cpu_dec(in_sched_probe);
 }
 
 // обработчик пробуждения
 static void probe_sched_wakeup(void* data, struct task_struct* p) {
   // выделяем память
   struct sleep_event* new_event;
+  if(this_cpu_inc_return(in_sched_probe)>1){
+    goto out_dec;
+  }
+
   new_event = kzalloc(sizeof(*new_event), GFP_ATOMIC);
   if (!new_event) {
-    return;
+    goto out_dec;
   }
   // получаем данные в структуру
   new_event->pid = p->pid;
@@ -177,15 +187,9 @@ static void probe_sched_wakeup(void* data, struct task_struct* p) {
   new_event->time_event_start = ktime_get_ns();
   get_task_comm(new_event->comm, p);
   llist_add(&new_event->node, &sleep_event_list);
-  schedule_work(&event_work);
+out_dec:
+  this_cpu_dec(in_sched_probe);
 }
-
-
-// вывод инфы о задаче (безполезен, был нужкн для проверки)
-static void pr_inf(struct task_struct* task) {
-  pr_info("PID: %d, Name: %s\n", task->pid, task->comm);
-}
-
 
 // функция для for_each_kernel_tracepoint нужна для получения адреса шед свича
 // для того чтобы потом зарагестровать по его адресу функцию
@@ -228,7 +232,8 @@ static int __init start_m(void) {
     return -ENOENT;
   }
   // регестрируем функцию в отложенный обработчик
-  INIT_WORK(&event_work, pars_event_llist_in_sleeping_tasks);
+  INIT_DELAYED_WORK(&event_work, pars_event_llist_in_sleeping_tasks);
+  schedule_delayed_work(&event_work, msecs_to_jiffies(100));
   // ##############################################
   // регистрация обработчикков
   int err;
@@ -241,7 +246,7 @@ static int __init start_m(void) {
   if(err){
     tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
     tracepoint_synchronize_unregister();
-    cancel_work_sync(&event_work);
+    cancel_delayed_work_sync(&event_work);
     pr_err("Error: %d\n", err);
     return err;
   }
@@ -250,14 +255,16 @@ static int __init start_m(void) {
 
 // конец
 static void __exit stop_m(void) {
+  struct llist_node *node;
+  struct llist_node *next;
+  struct sleep_event *event;
+  struct sleeping_task *node_main_struct, *next_main_struct;
 
   tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
   tracepoint_probe_unregister(found_wakeup, probe_sched_wakeup, NULL);
   tracepoint_synchronize_unregister();
-  cancel_work_sync(&event_work);
-  struct llist_node *node;
-  struct llist_node *next;
-  struct sleep_event *event;
+  cancel_delayed_work_sync(&event_work);
+
   node = llist_del_all(&sleep_event_list);
   while (node != NULL) {
     next = node->next;
@@ -266,6 +273,13 @@ static void __exit stop_m(void) {
     node = next;
   }
 
+
+  mutex_lock(&sleeping_tasks_mutex);
+  list_for_each_entry_safe(node_main_struct, next_main_struct, &sleeping_tasks, list){
+    list_del(&node_main_struct->list);
+    kfree(node_main_struct);
+  }
+  mutex_unlock(&sleeping_tasks_mutex);
   printk(KERN_INFO "exeit\n");
 }
 
