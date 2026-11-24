@@ -86,28 +86,39 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* event_work) {
   while (next_events != NULL) {
     // сохраняем некст чтобв его не потерть
     next = next_events->next;
+    // получаем все поля структуры из списка
     pols_list = llist_entry(next_events, struct sleep_event , node);
+    // сортировка событий 
     switch (pols_list->type) {
       case SLEEP_YES:{
+        //хрнаит структуру основного списка 
         struct sleeping_task* sleep_task;
+        // выделяем память под структуру
         sleep_task = kzalloc(sizeof(*sleep_task), GFP_KERNEL);
         if(!sleep_task){
           break;
         } else {
+          //копируем данные из вторичного листа в струтуру основного
           sleep_task->pid = pols_list->pid;
           sleep_task->sleep_start = pols_list->time_event_start;
           strscpy(sleep_task->comm , pols_list->comm, TASK_COMM_LEN);
+          // блокируем от одновременного взаимодействия
           mutex_lock(&sleeping_tasks_mutex);
+          //добовляем в основной список
           list_add_tail(&sleep_task->list, &sleeping_tasks);
+          // разблокируем
           mutex_unlock(&sleeping_tasks_mutex);
         }
         break;
-
       }
       case SLEEP_NO:{
+        // хранит основную структуру
         struct sleeping_task* task_search_values;
+        //следующий адрес структуры
         struct sleeping_task* next_task_adrress;
+        //блокировка
         mutex_lock(&sleeping_tasks_mutex);
+        //удаление из основного списка
         list_for_each_entry_safe(task_search_values, next_task_adrress, &sleeping_tasks, list){
           if(pols_list->pid == task_search_values->pid){
             list_del(&task_search_values->list);
@@ -115,11 +126,14 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* event_work) {
             break;
           }
         }
+        // разблокируем
         mutex_unlock(&sleeping_tasks_mutex);
         break;
       }
     }
+    // освобождаем вторичную структуру ивентов
     kfree(pols_list);
+    //переходим к слкдующему ивенту
     next_events = next;
   }
 }
@@ -239,6 +253,18 @@ static void __exit stop_m(void) {
 
   tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
   tracepoint_probe_unregister(found_wakeup, probe_sched_wakeup, NULL);
+  tracepoint_synchronize_unregister();
+  cancel_work_sync(&event_work);
+  struct llist_node *node;
+  struct llist_node *next;
+  struct sleep_event *event;
+  node = llist_del_all(&sleep_event_list);
+  while (node != NULL) {
+    next = node->next;
+    event = llist_entry(node, struct sleep_event, node);
+    kfree(event);
+    node = next;
+  }
 
   printk(KERN_INFO "exeit\n");
 }
