@@ -68,9 +68,9 @@ struct sleeping_task {
 static LLIST_HEAD(sleep_event_list);
 // объявление циклического связанного списка для основного списка
 static LIST_HEAD(sleeping_tasks);
-
+// блокировка
 static DEFINE_MUTEX(sleeping_tasks_mutex);
-
+//отложенное выполнение
 static DEFINE_PER_CPU(int, in_sched_probe);
 
 
@@ -145,14 +145,11 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
 
 // обработчик ухода в сон
 static void probe_sched_switch(void* data, bool preempt, struct task_struct* prev, struct task_struct* next, unsigned int prev_state) {
-  // переменная которая хранит адрес структуры типа sleep_event
   struct sleep_event* new_event;
   if (preempt || !(prev_state & TASK_UNINTERRUPTIBLE)){
     return;
   }
-  if (this_cpu_inc_return(in_sched_probe) > 1) {
-        goto out_dec;
-    }
+
     new_event = kzalloc(sizeof(*new_event), GFP_ATOMIC);
     if (!new_event) {
       goto out_dec;
