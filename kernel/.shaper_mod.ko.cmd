@@ -1,1 +1,0 @@
-savedcmd_shaper_mod.ko := ld -r -m elf_x86_64 -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/lib/modules/6.18.60-1-lts/build/scripts/module.lds -o shaper_mod.ko shaper_mod.o shaper_mod.mod.o .module-common.o
