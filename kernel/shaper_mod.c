@@ -5,7 +5,6 @@
 #include "linux/llist.h"
 #include "linux/percpu-defs.h"
 #include "linux/printk.h"
-#include "linux/spinlock_types.h"
 #include "linux/stddef.h"
 #include "linux/timekeeping.h"
 #include "linux/types.h"
