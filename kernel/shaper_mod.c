@@ -45,7 +45,7 @@ static LIST_HEAD(sleeping_tasks);
 static DEFINE_MUTEX(sleeping_tasks_mutex);
 //отложенное выполнение
 static DEFINE_PER_CPU(int, in_sched_probe);
-static DECLARE_BITMAP(my_bit_map, MAX_PID_DEFINE);
+static unsigned long *my_bit_map; 
 
 // структураы #############
 // приравнивание числам значений для удобной работы
@@ -75,7 +75,6 @@ struct sleeping_task {
 static struct tracepoint* found_swith = NULL;
 static struct tracepoint* found_wakeup = NULL;
 static struct delayed_work event_work;
-static struct proc_dir_entry *proc_create_err;
 static struct proc_dir_entry *my_dir;
 
 
@@ -220,7 +219,7 @@ out_dec:
 // обработчик пробуждения
 static void probe_sched_wakeup(void* data, struct task_struct* p) {
   // выделяем память
-  if(!test_bit(p->pid, my_bit_map)){
+  if(!test_and_clear_bit(p->pid, my_bit_map)){
     return;
   }
   struct sleep_event* new_event;
@@ -236,7 +235,6 @@ static void probe_sched_wakeup(void* data, struct task_struct* p) {
   new_event->pid = p->pid;
   new_event->type = SLEEP_NO;
   new_event->time_event_start = ktime_get_ns();
-  get_task_comm(new_event->comm, p);
   llist_add(&new_event->node, &sleep_event_list);
 out_dec:
   this_cpu_dec(in_sched_probe);
@@ -261,18 +259,24 @@ static void find_tp(struct tracepoint *tp, void *priv){
 static int __init start_m(void) {
   struct tp_lookup sw = { .name = "sched_switch" };
 	struct tp_lookup wk = { .name = "sched_wakeup" };
-	int err;
+  int err;
+  my_bit_map = bitmap_zalloc(MAX_PID_DEFINE, GFP_KERNEL);
+  if(!my_bit_map){
+    return -ENOMEM;
+  }
   for_each_kernel_tracepoint(find_tp, &sw);
   for_each_kernel_tracepoint(find_tp, &wk);
   if (!sw.tp || !wk.tp) {
     pr_err("свичь не найден ");
+    goto err_bitmap;
     return -ENOENT;
   }
   found_swith = sw.tp;
   found_wakeup = wk.tp;
   my_dir = proc_mkdir("my_dir", NULL);
   if(!my_dir){
-    return -ENOMEM;
+    err = -ENOMEM;
+    goto err_bitmap;
   }
   if(!proc_create("dstat_info", 0400, my_dir, &my_proc_ops)){
     err = -ENOMEM;
@@ -295,6 +299,8 @@ static int __init start_m(void) {
 	  tracepoint_synchronize_unregister();
   err_proc:
     proc_remove(my_dir);
+  err_bitmap:
+    bitmap_free(my_bit_map);
     return err;
 }
 
@@ -325,7 +331,8 @@ static void __exit stop_m(void) {
     kfree(node_main_struct);
   }
   mutex_unlock(&sleeping_tasks_mutex);
-  printk(KERN_INFO "exeit\n");
+  bitmap_free(my_bit_map);
+  printk(KERN_INFO "exet\n");
 }
 
 
