@@ -29,9 +29,10 @@
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
 #include <linux/percpu.h>
-#include <linux/proc_fs.h> 
-#include <linux/seq_file.h> 
-#include <string.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
+#include <linux/bitmap.h>
+
 
 MODULE_LICENSE("GPL");
 // объявление циклического не связанного списка
@@ -42,6 +43,7 @@ static LIST_HEAD(sleeping_tasks);
 static DEFINE_MUTEX(sleeping_tasks_mutex);
 //отложенное выполнение
 static DEFINE_PER_CPU(int, in_sched_probe);
+static DECLARE_BITMAP(my_bit_map, 4194304);
 
 // структураы #############
 // приравнивание числам значений для удобной работы
@@ -87,7 +89,7 @@ static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos){
 
 static void my_seq_stop(struct seq_file *s, void *v){
   mutex_unlock(&sleeping_tasks_mutex);
-  
+
 }
 
 static int my_seq_show(struct seq_file *s, void *v){
@@ -152,6 +154,7 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
           mutex_lock(&sleeping_tasks_mutex);
           //добовляем в основной список
           list_add_tail(&sleep_task->list, &sleeping_tasks);
+
           // разблокируем
           mutex_unlock(&sleeping_tasks_mutex);
         }
@@ -193,6 +196,7 @@ static void probe_sched_switch(void* data, bool preempt, struct task_struct* pre
   if (preempt || !(prev_state & TASK_UNINTERRUPTIBLE)){
     return;
   }
+  set_bit(prev->pid, my_bit_map);
   if (this_cpu_inc_return(in_sched_probe) > 1) {
     goto out_dec;
   }
@@ -219,7 +223,7 @@ static void probe_sched_wakeup(void* data, struct task_struct* p) {
     goto out_dec;
   }
 
-  new_event = kzalloc(sizeof(*new_event), GFP_ATOMIC);
+
   if (!new_event) {
     goto out_dec;
   }
@@ -279,7 +283,7 @@ static int __init start_m(void) {
     goto err_unreg_switch;
   }
   schedule_delayed_work(&event_work, msecs_to_jiffies(100));
-  pr_info("hello\n")
+  pr_info("hello\n");
   return 0;
   err_unreg_switch:
     tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
@@ -291,18 +295,18 @@ static int __init start_m(void) {
 
 // конец
 static void __exit stop_m(void) {
-  struct llist_node *node;
-  struct llist_node *next;
+
+  struct llist_node *node, *next;
   struct sleep_event *event;
   struct sleeping_task *node_main_struct, *next_main_struct;
-
+  proc_remove(my_dir);
   tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
   tracepoint_probe_unregister(found_wakeup, probe_sched_wakeup, NULL);
   tracepoint_synchronize_unregister();
   cancel_delayed_work_sync(&event_work);
 
   node = llist_del_all(&sleep_event_list);
-  while (node != NULL) {
+  while (node) {
     next = node->next;
     event = llist_entry(node, struct sleep_event, node);
     kfree(event);
@@ -316,8 +320,6 @@ static void __exit stop_m(void) {
     kfree(node_main_struct);
   }
   mutex_unlock(&sleeping_tasks_mutex);
-  proc_remove(proc_create_err);
-  proc_remove(my_dir);
   printk(KERN_INFO "exeit\n");
 }
 
