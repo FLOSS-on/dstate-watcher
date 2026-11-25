@@ -7,6 +7,7 @@
 #include "linux/printk.h"
 #include "linux/stddef.h"
 #include "linux/timekeeping.h"
+#include "linux/tracepoint-defs.h"
 #include "linux/types.h"
 #include "linux/workqueue_types.h"
 #include <linux/cleanup.h>
@@ -30,6 +31,7 @@
 #include <linux/percpu.h>
 #include <linux/proc_fs.h> 
 #include <linux/seq_file.h> 
+#include <string.h>
 
 MODULE_LICENSE("GPL");
 // объявление циклического не связанного списка
@@ -90,7 +92,7 @@ static void my_seq_stop(struct seq_file *s, void *v){
 
 static int my_seq_show(struct seq_file *s, void *v){
     struct sleeping_task *task = list_entry(v, struct sleeping_task, list);
-    seq_printf(s, "PID:%d|Comm:%-16s|Start:%llu", task->pid, task->comm, task->sleep_start);
+    seq_printf(s, "PID:%d|Comm:%-16s|Start:%llu\n", task->pid, task->comm, task->sleep_start);
     return 0;
 }
 
@@ -234,66 +236,57 @@ out_dec:
 // функция для for_each_kernel_tracepoint нужна для получения адреса шед свича
 // для того чтобы потом зарагестровать по его адресу функцию
 // tracepoint_probe_register
-static void find_tracepoint_switch(struct tracepoint* tp, void* priv) {
-  if (strcmp(tp->name, "sched_switch") == 0) {
-    struct tracepoint** found_ptr = (struct tracepoint** )priv;
-    *found_ptr = tp;
+struct tp_lookup{
+  const char *name;
+  struct tracepoint *tp;
+};
+
+static void find_tp(struct tracepoint *tp, void *priv){
+  struct tp_lookup *l = priv;
+  if (strcmp(tp->name, l->name) == 0){
+    l->tp = tp;
   }
 }
-
-
-// получает адрес sched_wakeup
-static void find_tracepoint_wakeup(struct tracepoint* tp, void* priv) {
-  if (strcmp(tp->name, "sched_wakeup") == 0) {
-    struct tracepoint **found_ptr = (struct tracepoint **)priv;
-    *found_ptr = tp;
-  }
-}
-
 
 // старт
 static int __init start_m(void) {
-  // вывод в логи привет
-  printk(KERN_INFO "hello\n");
+  struct tp_lookup sw = { .name = "sched_switch" };
+	struct tp_lookup wk = { .name = "sched_wakeup" };
+	int err;
+  for_each_kernel_tracepoint(find_tp, &sw);
+  for_each_kernel_tracepoint(find_tp, &wk);
+  if (!sw.tp || !wk.tp) {
+    pr_err("свичь не найден ");
+    return -ENOENT;
+  }
+  found_swith = sw.tp;
+  found_wakeup = wk.tp;
   my_dir = proc_mkdir("my_dir", NULL);
   if(!my_dir){
     return -ENOMEM;
   }
-  proc_create_err = proc_create("dstat_info", 0444, my_dir, &my_proc_ops);
-  // получаем адрес структуры для регестрации в шед_свич
-  // пириберааем траспоинты передовая функцию для поиска адреса шед_свича
-  for_each_kernel_tracepoint(find_tracepoint_switch, &found_swith);
-  if (!found_swith) {
-    pr_err("свичь не найден ");
-    return -ENOENT;
+  if(!proc_create("dstat_info", 0400, my_dir, &my_proc_ops)){
+    err = -ENOMEM;
+    goto err_proc;
   }
-  // получаем адрес структуры для регестрации в шед_свич вецкам
-  // пириберааем траспоинты передовая функцию для поиска адреса шед_свича
-  for_each_kernel_tracepoint(find_tracepoint_wakeup, &found_wakeup);
-  if (!found_wakeup) {
-    pr_err("свичь не найден ");
-    return -ENOENT;
-  }
-  // регестрируем функцию в отложенный обработчик
   INIT_DELAYED_WORK(&event_work, pars_event_llist_in_sleeping_tasks);
-  schedule_delayed_work(&event_work, msecs_to_jiffies(100));
-  // ##############################################
-  // регистрация обработчикков
-  int err;
   err = tracepoint_probe_register(found_swith, probe_sched_switch, NULL);
   if(err){
-    pr_err("Error: %d\n", err);
-    return err;
+    goto err_proc;
   }
   err = tracepoint_probe_register(found_wakeup, probe_sched_wakeup, NULL);
   if(err){
-    tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
-    tracepoint_synchronize_unregister();
-    cancel_delayed_work_sync(&event_work);
-    pr_err("Error: %d\n", err);
-    return err;
+    goto err_unreg_switch;
   }
+  schedule_delayed_work(&event_work, msecs_to_jiffies(100));
+  pr_info("hello\n")
   return 0;
+  err_unreg_switch:
+    tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
+	  tracepoint_synchronize_unregister();
+  err_proc:
+    proc_remove(my_dir);
+    return err;
 }
 
 // конец
