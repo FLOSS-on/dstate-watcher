@@ -1,4 +1,5 @@
 #include "asm-generic/errno-base.h"
+#include "linux/bitops.h"
 #include "linux/gfp_types.h"
 #include "linux/jiffies.h"
 #include "linux/kasan.h"
@@ -35,6 +36,7 @@
 
 
 MODULE_LICENSE("GPL");
+#define MAX_PID_DEFINE 4194304
 // объявление циклического не связанного списка
 static LLIST_HEAD(sleep_event_list);
 // объявление циклического связанного списка для основного списка
@@ -43,7 +45,7 @@ static LIST_HEAD(sleeping_tasks);
 static DEFINE_MUTEX(sleeping_tasks_mutex);
 //отложенное выполнение
 static DEFINE_PER_CPU(int, in_sched_probe);
-static DECLARE_BITMAP(my_bit_map, 4194304);
+static DECLARE_BITMAP(my_bit_map, MAX_PID_DEFINE);
 
 // структураы #############
 // приравнивание числам значений для удобной работы
@@ -218,6 +220,9 @@ out_dec:
 // обработчик пробуждения
 static void probe_sched_wakeup(void* data, struct task_struct* p) {
   // выделяем память
+  if(!test_bit(p->pid, my_bit_map)){
+    return;
+  }
   struct sleep_event* new_event;
   if(this_cpu_inc_return(in_sched_probe)>1){
     goto out_dec;
