@@ -28,14 +28,18 @@
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
 #include <linux/percpu.h>
+#include <linux/proc_fs.h> 
+#include <linux/seq_file.h> 
 
 MODULE_LICENSE("GPL");
-
-// глобальные переменные ################
-static struct tracepoint* found_swith = NULL;
-static struct tracepoint* found_wakeup = NULL;
-static struct delayed_work event_work;
-
+// объявление циклического не связанного списка
+static LLIST_HEAD(sleep_event_list);
+// объявление циклического связанного списка для основного списка
+static LIST_HEAD(sleeping_tasks);
+// блокировка
+static DEFINE_MUTEX(sleeping_tasks_mutex);
+//отложенное выполнение
+static DEFINE_PER_CPU(int, in_sched_probe);
 
 // структураы #############
 // приравнивание числам значений для удобной работы
@@ -57,21 +61,59 @@ struct sleeping_task {
   pid_t pid;
   char comm[TASK_COMM_LEN];
   u64 sleep_start;
-  u64 sleep_end;
   // механизм связанного списка
   struct list_head list;
 
 };
+// глобальные переменные ################
+static struct tracepoint* found_swith = NULL;
+static struct tracepoint* found_wakeup = NULL;
+static struct delayed_work event_work;
+static struct proc_dir_entry *proc_create_err;
+static struct proc_dir_entry *my_dir;
 
 
-// объявление циклического не связанного списка
-static LLIST_HEAD(sleep_event_list);
-// объявление циклического связанного списка для основного списка
-static LIST_HEAD(sleeping_tasks);
-// блокировка
-static DEFINE_MUTEX(sleeping_tasks_mutex);
-//отложенное выполнение
-static DEFINE_PER_CPU(int, in_sched_probe);
+
+static void *my_seq_start(struct seq_file *s, loff_t *pos){
+  mutex_lock(&sleeping_tasks_mutex);
+  return seq_list_start(&sleeping_tasks, *pos);
+}
+
+static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos){
+    return seq_list_next(v, &sleeping_tasks, pos);
+}
+
+static void my_seq_stop(struct seq_file *s, void *v){
+  mutex_unlock(&sleeping_tasks_mutex);
+  
+}
+
+static int my_seq_show(struct seq_file *s, void *v){
+    struct sleeping_task *task = list_entry(v, struct sleeping_task, list);
+    seq_printf(s, "PID:%d|Comm:%-16s|Start:%llu", task->pid, task->comm, task->sleep_start);
+    return 0;
+}
+
+
+
+static const struct seq_operations my_seq_ops = {
+  .start = my_seq_start,
+  .next = my_seq_next,
+  .stop = my_seq_stop,
+  .show = my_seq_show,
+};
+
+static int my_proc_open(struct inode *inode, struct file *file){
+  return seq_open(file, &my_seq_ops);
+}
+
+
+static const struct proc_ops my_proc_ops = {
+    .proc_open    = my_proc_open,
+    .proc_read    = seq_read,
+    .proc_lseek   = seq_lseek,
+    .proc_release = seq_release,
+};
 
 
 // отложенный обработчик для парсв llist в основной циклический список
@@ -149,19 +191,21 @@ static void probe_sched_switch(void* data, bool preempt, struct task_struct* pre
   if (preempt || !(prev_state & TASK_UNINTERRUPTIBLE)){
     return;
   }
-
-    new_event = kzalloc(sizeof(*new_event), GFP_ATOMIC);
-    if (!new_event) {
-      goto out_dec;
-    }
-    // получаем данные в структуру
-    new_event->pid = prev->pid;
-    new_event->type = SLEEP_YES;
-    new_event->time_event_start = ktime_get_ns();
-    get_task_comm(new_event->comm, prev);
-    // передаем в ллист
-    llist_add(&new_event->node, &sleep_event_list);
-  out_dec:
+  if (this_cpu_inc_return(in_sched_probe) > 1) {
+    goto out_dec;
+  }
+  new_event = kzalloc(sizeof(*new_event), GFP_ATOMIC);
+  if (!new_event) {
+    goto out_dec;
+  }
+  // получаем данные в структуру
+  new_event->pid = prev->pid;
+  new_event->type = SLEEP_YES;
+  new_event->time_event_start = ktime_get_ns();
+  get_task_comm(new_event->comm, prev);
+  // передаем в ллист
+  llist_add(&new_event->node, &sleep_event_list);
+out_dec:
     this_cpu_dec(in_sched_probe);
 }
 
@@ -211,8 +255,11 @@ static void find_tracepoint_wakeup(struct tracepoint* tp, void* priv) {
 static int __init start_m(void) {
   // вывод в логи привет
   printk(KERN_INFO "hello\n");
-  // получаем время загрузки можуля
-
+  my_dir = proc_mkdir("my_dir", NULL);
+  if(!my_dir){
+    return -ENOMEM;
+  }
+  proc_create_err = proc_create("dstat_info", 0444, my_dir, &my_proc_ops);
   // получаем адрес структуры для регестрации в шед_свич
   // пириберааем траспоинты передовая функцию для поиска адреса шед_свича
   for_each_kernel_tracepoint(find_tracepoint_switch, &found_swith);
@@ -276,6 +323,8 @@ static void __exit stop_m(void) {
     kfree(node_main_struct);
   }
   mutex_unlock(&sleeping_tasks_mutex);
+  proc_remove(proc_create_err);
+  proc_remove(my_dir);
   printk(KERN_INFO "exeit\n");
 }
 
