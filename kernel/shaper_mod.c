@@ -24,6 +24,7 @@
 #include "linux/gfp_types.h"
 #include "linux/jiffies.h"
 #include "linux/kasan.h"
+#include "linux/limits.h"
 #include "linux/llist.h"
 #include "linux/percpu-defs.h"
 #include "linux/printk.h"
@@ -81,8 +82,6 @@ struct sleep_event {
   pid_t pid;
   char comm[TASK_COMM_LEN];
   u64 time_event_start;
-  // хранит следующий элемент
-  struct llist_node node;
 };
 // запись для полноценого списка
 struct sleeping_task {
@@ -124,7 +123,7 @@ static DEFINE_MUTEX(sleeping_tasks_mutex);
 // --- защита проб и быстрый фильтр ---
 //отложенное выполнение
 static DEFINE_PER_CPU(int, in_sched_probe);
-static unsigned long *my_bit_map; 
+static unsigned long *my_bit_map;
 
 // --- новые буферы событий, по одному на процессор ---
 static DEFINE_PER_CPU(struct cpu_event_buf, event_bufs);
@@ -156,7 +155,7 @@ static int alloc_fifos(void){
       free_fifos();
       return err;
     }
-  }  
+  }
   return 0;
 }
 
@@ -209,41 +208,41 @@ static const struct proc_ops my_proc_ops = {
 
 // отложенный обработчик для парсв llist в основной циклический список
 static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
-  // перменная указатель на next
-  struct llist_node*  next_events;
-  // переменная укаазатель на поля моего sleep_event
-  struct sleep_event* pols_list;
-  // перменная для хранения следующего в списке, так как если не сохранить то мы его потеряем
-  struct llist_node* next;
-  // передаем адес в перменную
-  next_events = llist_del_all(&sleep_event_list);
-  next_events = llist_reverse_order(next_events);
-
-  // обработчи
-  while (next_events != NULL) {
-    // сохраняем некст чтобв его не потерть
-    next = next_events->next;
-    // получаем все поля структуры из списка
-    pols_list = llist_entry(next_events, struct sleep_event , node);
-    // сортировка событий
-    switch (pols_list->type) {
+  int cpu;
+  int best_cpu;
+  u64 min_time;
+  struct sleep_event temp_ev;
+  mutex_lock(&sleeping_tasks_mutex);
+  while (1) {
+    best_cpu = -1;
+    min_time = U64_MAX;
+    for_each_possible_cpu(cpu){
+      if(!(kfifo_peek(&per_cpu_ptr(&event_bufs, cpu)->fifo, &temp_ev))){
+        continue;
+      }
+      if (!(temp_ev.time_event_start<min_time)){
+        continue;
+      }
+      min_time = temp_ev.time_event_start;
+      best_cpu = cpu;
+    }
+    if (best_cpu == -1){
+        break;
+    }
+    if(!(kfifo_get(&per_cpu_ptr(&event_bufs, best_cpu)->fifo, &temp_ev))){
+      continue;
+    }
+    switch (temp_ev.type) {
       case SLEEP_YES:{
         //хрнаит структуру основного списка
         struct sleeping_task* sleep_task;
         // выделяем память под структуру
-        sleep_task = kzalloc(sizeof(*sleep_task), GFP_KERNEL);
+        sleep_task = kzalloc(sizeof(*sleep_task), GFP_ATOMIC);
         if(sleep_task){
-          //копируем данные из вторичного листа в струтуру основного
-          sleep_task->pid = pols_list->pid;
-          sleep_task->sleep_start = pols_list->time_event_start;
-          strscpy(sleep_task->comm , pols_list->comm, TASK_COMM_LEN);
-          // блокируем от одновременного взаимодействия
-          mutex_lock(&sleeping_tasks_mutex);
-          //добовляем в основной список
+          sleep_task->pid = temp_ev.pid;
+          sleep_task->sleep_start = temp_ev.time_event_start;
+          strscpy(sleep_task->comm , temp_ev.comm, TASK_COMM_LEN);
           list_add_tail(&sleep_task->list, &sleeping_tasks);
-
-          // разблокируем
-          mutex_unlock(&sleeping_tasks_mutex);
         }
         break;
       }
@@ -252,26 +251,19 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
         struct sleeping_task* task_search_values;
         //следующий адрес структуры
         struct sleeping_task* next_task_adrress;
-        //блокировка
-        mutex_lock(&sleeping_tasks_mutex);
-        //удаление из основного списка
         list_for_each_entry_safe(task_search_values, next_task_adrress, &sleeping_tasks, list){
-          if(pols_list->pid == task_search_values->pid){
+          if(temp_ev.pid == task_search_values->pid){
             list_del(&task_search_values->list);
             kfree(task_search_values);
             break;
           }
         }
-        // разблокируем
-        mutex_unlock(&sleeping_tasks_mutex);
         break;
       }
     }
-    // освобождаем вторичную структуру ивентов
-    kfree(pols_list);
-    //переходим к слкдующему ивенту
-    next_events = next;
+
   }
+  mutex_unlock(&sleeping_tasks_mutex);
   schedule_delayed_work(&event_work, msecs_to_jiffies(100));
 }
 
@@ -282,49 +274,46 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
 
 // обработчик ухода в сон
 static void probe_sched_switch(void* data, bool preempt, struct task_struct* prev, struct task_struct* next, unsigned int prev_state) {
-  struct sleep_event* new_event;
+  struct sleep_event new_event;
   if (preempt || !(prev_state & TASK_UNINTERRUPTIBLE)){
     return;
   }
-  set_bit(prev->pid, my_bit_map);
   if (this_cpu_inc_return(in_sched_probe) > 1) {
     goto out_dec;
   }
-  new_event = kzalloc(sizeof(*new_event), GFP_ATOMIC);
-  if (!new_event) {
-    goto out_dec;
+  new_event.pid = prev->pid;
+  new_event.type = SLEEP_YES;
+  new_event.time_event_start = ktime_get_ns();
+  get_task_comm(new_event.comm, prev);
+  int err;
+  err = kfifo_put(&this_cpu_ptr(&event_bufs)->fifo, new_event);
+  if(!err){
+      set_bit(prev->pid, my_bit_map);
+
   }
-  // получаем данные в структуру
-  new_event->pid = prev->pid;
-  new_event->type = SLEEP_YES;
-  new_event->time_event_start = ktime_get_ns();
-  get_task_comm(new_event->comm, prev);
-  // передаем в ллист
-  llist_add(&new_event->node, &sleep_event_list);
+
+
 out_dec:
     this_cpu_dec(in_sched_probe);
 }
 
 // обработчик пробуждения
 static void probe_sched_wakeup(void* data, struct task_struct* p) {
-  // выделяем память
+    struct sleep_event new_event;
   if(!test_and_clear_bit(p->pid, my_bit_map)){
     return;
   }
-  struct sleep_event* new_event;
+
   if(this_cpu_inc_return(in_sched_probe)>1){
     goto out_dec;
   }
 
+  new_event.pid = p->pid;
+  new_event.type = SLEEP_NO;
+  new_event.time_event_start = ktime_get_ns();
 
-  if (!new_event) {
-    goto out_dec;
-  }
-  // получаем данные в структуру
-  new_event->pid = p->pid;
-  new_event->type = SLEEP_NO;
-  new_event->time_event_start = ktime_get_ns();
-  llist_add(&new_event->node, &sleep_event_list);
+  kfifo_put(&this_cpu_ptr(&event_bufs)->fifo, new_event);
+
 out_dec:
   this_cpu_dec(in_sched_probe);
 }
