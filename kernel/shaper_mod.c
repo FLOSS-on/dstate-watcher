@@ -387,8 +387,6 @@ static int __init start_m(void) {
 // конец
 static void __exit stop_m(void) {
 
-  struct llist_node *node, *next;
-  struct sleep_event *event;
   struct sleeping_task *node_main_struct, *next_main_struct;
   proc_remove(my_dir);
   tracepoint_probe_unregister(found_swith, probe_sched_switch, NULL);
