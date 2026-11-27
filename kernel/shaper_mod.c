@@ -270,9 +270,9 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
 // обработчик ухода в сон
 static void probe_sched_switch(void* data, bool preempt, struct task_struct* prev, struct task_struct* next, unsigned int prev_state) {
   struct sleep_event new_event;
-  if (preempt || !(prev_state & TASK_UNINTERRUPTIBLE)){
+  if (preempt || (prev_state & (TASK_UNINTERRUPTIBLE | TASK_NOLOAD)) != TASK_UNINTERRUPTIBLE) {
     return;
-  }
+}
   if (this_cpu_inc_return(in_sched_probe) > 1) {
     goto out_dec;
   }
@@ -393,10 +393,7 @@ static void __exit stop_m(void) {
   tracepoint_probe_unregister(found_wakeup, probe_sched_wakeup, NULL);
   tracepoint_synchronize_unregister();
   cancel_delayed_work_sync(&event_work);
-  /////////////////////////
   free_fifos();
-////////////////////////////////
-
   mutex_lock(&sleeping_tasks_mutex);
   list_for_each_entry_safe(node_main_struct, next_main_struct, &sleeping_tasks, list){
     list_del(&node_main_struct->list);
