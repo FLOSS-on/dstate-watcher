@@ -6,10 +6,10 @@ A real-time monitoring tool for tracking processes in `TASK_UNINTERRUPTIBLE` (D-
 
 ## Disclaimer & Project Background
 
-> **Note:** This is an educational project and my very first attempt at writing C and Linux kernel code. 
-> 
-> While the Go TUI part was written with AI assistance (a bit of "vibe coding"), the core kernel module is not purely AI-generated—the main goal of this project was to learn C, Linux kernel internals, and kernel APIs rather than Go libraries. 
-> 
+> **Note:** This is an educational project and my very first attempt at writing C and Linux kernel code.
+>
+> While the Go TUI part was written with AI assistance (a bit of "vibe coding"), the core kernel module is not purely AI-generated—the main goal of this project was to learn C, Linux kernel internals, and kernel APIs rather than Go libraries.
+>
 > Because this is a learning project, I cannot guarantee 100% stability or completely accurate statistics under extreme loads. The module was originally developed and tested on Linux kernel **6.12.x**, and it has also been verified to build and run on **6.18**.
 
 ## Architecture
@@ -35,4 +35,3 @@ go run .
 ```bash
 sudo rmmod your_module_name
 ```
-
