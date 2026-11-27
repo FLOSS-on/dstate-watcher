@@ -109,11 +109,6 @@ struct cpu_event_buf{
 /* ========================================================================
  * 4. ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
  * ======================================================================== */
-
-// --- старая очередь событий (проба -> work), будет заменена на event_bufs ---
-// объявление циклического не связанного списка
-static LLIST_HEAD(sleep_event_list);
-
 // --- итоговый список спящих задач (его показывает /proc) ---
 // объявление циклического связанного списка для основного списка
 static LIST_HEAD(sleeping_tasks);
@@ -264,7 +259,7 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
 
   }
   mutex_unlock(&sleeping_tasks_mutex);
-  schedule_delayed_work(&event_work, msecs_to_jiffies(100));
+  schedule_delayed_work(&event_work, msecs_to_jiffies(50));
 }
 
 
@@ -287,7 +282,7 @@ static void probe_sched_switch(void* data, bool preempt, struct task_struct* pre
   get_task_comm(new_event.comm, prev);
   int err;
   err = kfifo_put(&this_cpu_ptr(&event_bufs)->fifo, new_event);
-  if(!err){
+  if(err){
       set_bit(prev->pid, my_bit_map);
 
   }
@@ -352,7 +347,7 @@ static int __init start_m(void) {
   if (!sw.tp || !wk.tp) {
     pr_err("свичь не найден ");
     err = -ENOENT;
-    goto err_bitmap;
+    goto err_fifos;
   }
   found_swith = sw.tp;
   found_wakeup = wk.tp;
@@ -400,15 +395,9 @@ static void __exit stop_m(void) {
   tracepoint_probe_unregister(found_wakeup, probe_sched_wakeup, NULL);
   tracepoint_synchronize_unregister();
   cancel_delayed_work_sync(&event_work);
-
-  node = llist_del_all(&sleep_event_list);
-  while (node) {
-    next = node->next;
-    event = llist_entry(node, struct sleep_event, node);
-    kfree(event);
-    node = next;
-  }
-
+  /////////////////////////
+  free_fifos();
+////////////////////////////////
 
   mutex_lock(&sleeping_tasks_mutex);
   list_for_each_entry_safe(node_main_struct, next_main_struct, &sleeping_tasks, list){
