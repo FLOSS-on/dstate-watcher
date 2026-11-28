@@ -70,20 +70,16 @@ MODULE_LICENSE("GPL");
  * 3. ТИПЫ: enum и структуры
  * ======================================================================== */
 
-// структураы #############
-// приравнивание числам значений для удобной работы
 enum sleep_event_type {
   SLEEP_YES = 0,
   SLEEP_NO = 1
 };
-// ивентовая структура для быстрой обработки
 struct sleep_event {
   enum sleep_event_type type;
   pid_t pid;
   char comm[TASK_COMM_LEN];
   u64 time_event_start;
 };
-// запись для полноценого списка
 struct sleeping_task {
   pid_t pid;
   char comm[TASK_COMM_LEN];
@@ -93,14 +89,10 @@ struct sleeping_task {
 
 };
 
-// функция для for_each_kernel_tracepoint нужна для получения адреса шед свича
-// для того чтобы потом зарагестровать по его адресу функцию
-// tracepoint_probe_register
 struct tp_lookup{
   const char *name;
   struct tracepoint *tp;
 };
-// буфер событий одного процессора (используется ниже в event_bufs)
 struct cpu_event_buf{
   DECLARE_KFIFO_PTR(fifo, struct sleep_event);
 };
@@ -109,22 +101,15 @@ struct cpu_event_buf{
 /* ========================================================================
  * 4. ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
  * ======================================================================== */
-// --- итоговый список спящих задач (его показывает /proc) ---
-// объявление циклического связанного списка для основного списка
 static LIST_HEAD(sleeping_tasks);
 // блокировка
 static DEFINE_MUTEX(sleeping_tasks_mutex);
 
-// --- защита проб и быстрый фильтр ---
-//отложенное выполнение
 static DEFINE_PER_CPU(int, in_sched_probe);
 static unsigned long *my_bit_map;
 
-// --- новые буферы событий, по одному на процессор ---
 static DEFINE_PER_CPU(struct cpu_event_buf, event_bufs);
 
-// --- tracepoint'ы, отложенная работа, папка в /proc ---
-// глобальные переменные ################
 static struct tracepoint* found_swith = NULL;
 static struct tracepoint* found_wakeup = NULL;
 static struct delayed_work event_work;
@@ -201,7 +186,6 @@ static const struct proc_ops my_proc_ops = {
  * 7. ОТЛОЖЕННАЯ РАБОТА (work)
  * ======================================================================== */
 
-// отложенный обработчик для парсв llist в основной циклический список
 static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
   int cpu;
   int best_cpu;
@@ -229,9 +213,7 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
     }
     switch (temp_ev.type) {
       case SLEEP_YES:{
-        //хрнаит структуру основного списка
         struct sleeping_task* sleep_task;
-        // выделяем память под структуру
         sleep_task = kzalloc(sizeof(*sleep_task), GFP_ATOMIC);
         if(sleep_task){
           sleep_task->pid = temp_ev.pid;
@@ -242,9 +224,7 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
         break;
       }
       case SLEEP_NO:{
-        // хранит основную структуру
         struct sleeping_task* task_search_values;
-        //следующий адрес структуры
         struct sleeping_task* next_task_adrress;
         list_for_each_entry_safe(task_search_values, next_task_adrress, &sleeping_tasks, list){
           if(temp_ev.pid == task_search_values->pid){
@@ -267,7 +247,6 @@ static void pars_event_llist_in_sleeping_tasks(struct work_struct* work) {
  * 8. ПРОБЫ (вызываются планировщиком)
  * ======================================================================== */
 
-// обработчик ухода в сон
 static void probe_sched_switch(void* data, bool preempt, struct task_struct* prev, struct task_struct* next, unsigned int prev_state) {
   struct sleep_event new_event;
   if (preempt || (prev_state & (TASK_UNINTERRUPTIBLE | TASK_NOLOAD)) != TASK_UNINTERRUPTIBLE) {
@@ -292,7 +271,6 @@ out_dec:
     this_cpu_dec(in_sched_probe);
 }
 
-// обработчик пробуждения
 static void probe_sched_wakeup(void* data, struct task_struct* p) {
     struct sleep_event new_event;
   if(!test_and_clear_bit(p->pid, my_bit_map)){
@@ -329,7 +307,6 @@ static void find_tp(struct tracepoint *tp, void *priv){
  * 10. ЗАПУСК И ОСТАНОВКА МОДУЛЯ
  * ======================================================================== */
 
-// старт
 static int __init start_m(void) {
   struct tp_lookup sw = { .name = "sched_switch" };
 	struct tp_lookup wk = { .name = "sched_wakeup" };
@@ -384,7 +361,6 @@ static int __init start_m(void) {
     return err;
 }
 
-// конец
 static void __exit stop_m(void) {
 
   struct sleeping_task *node_main_struct, *next_main_struct;
